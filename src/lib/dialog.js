@@ -1,18 +1,20 @@
 // The conversation engine. One call per utterance:
-//   const out = await handleUtterance(session, transcript, { parse })
-//   out = { session, reply, expectReply, saved, undoable }
+//   const out = await handleUtterance(session, transcript, { parse, ignoreNoise })
+//   out = { session, reply, expectReply, saved, undoable, ignored }
+// ignoreNoise (hands-free mode): chatter that is not a command gets no reply and no miss count.
 // `parse(text, shop)` returns the LLM-shaped JSON (Claude, or the keyword parser as fallback).
 // Pure apart from that call, so the whole voice flow runs in Node tests without a browser.
 
 import {
   applySale, applyPayment, applyStockIn, undoEntry, addCustomer, addProduct,
   priceLines, todayTotals, rupees, findCustomerById, findProductById, isLow, reminderMessage, whatsappLink,
+  owingCustomers, daysOwed, payPageLink, dailySummary,
 } from "./ledger.js";
 import { keywordParse, resolve, answerKind, firstNumber, cleanTokens, detectMode, hasRemoveWord } from "./parser.js";
 import { findMentions, findCustomer, narrowByTags } from "./match.js";
 
 export function newSession(state) {
-  return { state, pending: null, failCount: 0, reminders: null, showManual: false, lastReply: "" };
+  return { state, pending: null, failCount: 0, reminders: null, share: null, showManual: false, lastReply: "" };
 }
 
 const say = (session, reply, extra = {}) => ({
@@ -30,12 +32,15 @@ const fmtQty = (q) => (Number.isInteger(q) ? String(q) : String(q).replace(/\.0+
 
 // ---- entry point ----
 
-export async function handleUtterance(session0, text, { parse } = {}) {
+export async function handleUtterance(session0, text, { parse, ignoreNoise = false } = {}) {
   const session = { ...session0 };
   const transcript = String(text || "").trim();
   const parseFn = parse || (async (t, shop) => keywordParse(t, shop));
+  // In hands-free mode the mic hears the whole shop; stay quiet unless the app asked something.
+  const quiet = ignoreNoise && !session0.pending;
+  const ignored = () => ({ session: session0, reply: "", expectReply: false, saved: null, undoable: false, ignored: true });
 
-  if (!cleanTokens(transcript).length) return noise(session);
+  if (!cleanTokens(transcript).length) return quiet ? ignored() : noise(session);
 
   if (session.pending) {
     const handled = await handlePending(session, transcript, parseFn);
@@ -50,6 +55,7 @@ export async function handleUtterance(session0, text, { parse } = {}) {
     parsed = keywordParse(transcript, session.state);
   }
   const card = resolve(parsed, session.state, transcript);
+  if (quiet && !card.intent) return ignored();
   return dispatch(session, card);
 }
 
@@ -58,7 +64,8 @@ function dispatch(session, card) {
     case "sale": return processSale(okay(session), card);
     case "payment": return processPayment(okay(session), card);
     case "query": return processQuery(okay(session), card);
-    case "reminder": return processReminder(okay(session));
+    case "reminder": return processReminder(okay(session), card);
+    case "summary": return processSummary(okay(session));
     case "stock_in": return processStockIn(okay(session), card);
     case "undo": return processUndo(okay(session));
     default: return noise(session);
@@ -141,10 +148,13 @@ async function handlePending(session, text, parseFn) {
     }
     case "confirm_reminder": {
       if (kind === "yes") {
+        // In the browser the message carries a link to this app's /pay page (UPI button + QR code).
+        const origin = globalThis.location?.origin || null;
         const list = p.customers.map((c) => {
           const cur = findCustomerById(session.state, c.id) || c;
-          const message = reminderMessage(session.state.shop, cur);
-          return { id: cur.id, name: cur.name, balance: cur.balance, message, link: whatsappLink(cur.phone, message) };
+          const payLink = payPageLink(origin, session.state, cur);
+          const message = reminderMessage(session.state.shop, cur, { payLink });
+          return { id: cur.id, name: cur.name, balance: cur.balance, days: daysOwed(cur), message, payLink, link: whatsappLink(cur.phone, message) };
         });
         return say({ ...session, pending: null, reminders: list }, "Reminder taiyaar. WhatsApp button dabaiye.");
       }
@@ -213,6 +223,7 @@ function resume(session, card, then) {
   const s = { ...session, pending: null, failCount: 0 };
   if (then === "payment") return processPayment(s, card);
   if (then === "query") return processQuery(s, card);
+  if (then === "reminder") return processReminder(s, card);
   if (then === "stock_in") return processStockIn(s, card);
   return processSale(s, card);
 }
@@ -355,8 +366,25 @@ function processQuery(session, card) {
   return say(session, `Aaj ${rupees(t.bikri)} ki bikri, ${rupees(t.udhaar)} udhaar, ${rupees(t.payment)} mile.`);
 }
 
-function processReminder(session) {
-  const owing = session.state.customers.filter((c) => c.balance > 0);
+// "Aaj ka hisaab bhejo": read the day out and get a WhatsApp summary ready.
+function processSummary(session) {
+  const t = todayTotals(session.state);
+  const text = dailySummary(session.state);
+  return say(
+    { ...session, share: { title: "Aaj ka hisaab", text, link: whatsappLink("", text) } },
+    `Aaj ${rupees(t.bikri)} ki bikri, ${rupees(t.udhaar)} udhaar, ${rupees(t.payment)} mile. Hisaab WhatsApp ke liye taiyaar.`,
+  );
+}
+
+// Reminders go out longest-owed first. With a name, only to that customer.
+function processReminder(session, card) {
+  if (card?.candidates?.length > 1 && !card.customer) return askWhich(session, card, "reminder");
+  if (card?.customer) {
+    const c = findCustomerById(session.state, card.customer.id);
+    if (!(c.balance > 0)) return say(session, `${c.name} ka kuch baaki nahi.`);
+    return ask({ ...session, reminders: null }, `${c.name} ko ${rupees(c.balance)} ka reminder bhejun?`, { kind: "confirm_reminder", customers: [c] });
+  }
+  const owing = owingCustomers(session.state);
   if (!owing.length) return say(session, "Kisi ka kuch baaki nahi.");
   const q = owing.length === 1 ? `${owing[0].name} ko reminder bhejun?` : `${owing.length} logon ko reminder bhejun?`;
   return ask({ ...session, reminders: null }, q, { kind: "confirm_reminder", customers: owing });

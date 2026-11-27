@@ -7,7 +7,8 @@ export const canListen = () => !!Recognition;
 export const canSpeak = () => typeof window !== "undefined" && "speechSynthesis" in window;
 
 // Starts listening. Stops 1.5 s after speech ends, or after `noSpeechMs` with no speech at all.
-// Calls onInterim(text) while listening and onDone({ text, silent, error }) exactly once.
+// Calls onInterim(text) while listening and onDone({ text, silent, error, speechAt }) exactly once;
+// speechAt is when the first words were heard (for the "Voice: 4 s" timer on entries).
 export function listen({ lang = "hi-IN", silenceMs = 1500, noSpeechMs = 8000, onInterim, onDone }) {
   if (!Recognition) {
     onDone({ text: "", error: "unsupported" });
@@ -22,6 +23,7 @@ export function listen({ lang = "hi-IN", silenceMs = 1500, noSpeechMs = 8000, on
   let finalText = "";
   let interimText = "";
   let heard = false;
+  let speechAt = null;
   let done = false;
   let silenceTimer = null;
   const noSpeechTimer = setTimeout(() => { if (!heard) finish({ silent: true }); }, noSpeechMs);
@@ -33,10 +35,11 @@ export function listen({ lang = "hi-IN", silenceMs = 1500, noSpeechMs = 8000, on
     clearTimeout(noSpeechTimer);
     try { rec.stop(); } catch { /* already stopped */ }
     const text = (finalText + " " + interimText).trim();
-    onDone({ text, silent: !text, ...extra });
+    onDone({ text, silent: !text, speechAt, ...extra });
   }
 
   rec.onresult = (event) => {
+    if (!heard) speechAt = Date.now();
     heard = true;
     finalText = "";
     interimText = "";

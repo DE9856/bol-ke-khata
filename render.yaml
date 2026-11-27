@@ -1,0 +1,13 @@
+# One-click deploy on Render (https://render.com): New → Blueprint → pick this repository.
+# Render builds the same Dockerfile as `docker compose up`, serves it over HTTPS (needed for the
+# microphone and for "Install app"), and sets PORT itself.
+services:
+  - type: web
+    name: bol-ke-khata
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # Optional. Leave empty and the app uses its built-in keyword parser ("AI key not set").
+      - key: ANTHROPIC_API_KEY
+        sync: false

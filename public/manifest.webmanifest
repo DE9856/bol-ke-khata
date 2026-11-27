@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "Bol ke Khata · बोल के खाता",
+  "short_name": "Bol ke Khata",
+  "description": "Voice ledger for kirana shops: say the sale in Hindi or Hinglish and it is written in the khata. Udhaar, payments, stock and WhatsApp reminders.",
+  "lang": "hi-IN",
+  "dir": "ltr",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#F6F1E7",
+  "theme_color": "#F6F1E7",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Udhaar", "short_name": "Udhaar", "description": "Kiska kitna baaki hai", "url": "/?screen=udhaar", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Aaj ka hisaab", "short_name": "Hisaab", "description": "Aaj ki bikri aur entries", "url": "/?screen=hisaab", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Stock", "short_name": "Stock", "description": "Kya kam hai", "url": "/?screen=stock", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ],
+  "screenshots": [
+    { "src": "/screenshots/home.png", "sizes": "780x1688", "type": "image/png", "form_factor": "narrow", "label": "Bolkar entry karein: aaj ki bikri, cash aur udhaar ek nazar mein" },
+    { "src": "/screenshots/confirm.png", "sizes": "780x1688", "type": "image/png", "form_factor": "narrow", "label": "Udhaar likhne se pehle poochhta hai: Sahi hai?" },
+    { "src": "/screenshots/udhaar.png", "sizes": "780x1688", "type": "image/png", "form_factor": "narrow", "label": "Kiska kitna baaki, kab se: WhatsApp reminder ek tap mein" }
+  ]
+}

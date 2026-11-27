@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { seedState } from "../src/lib/seed.js";
 import { newSession, handleUtterance } from "../src/lib/dialog.js";
-import { todayTotals } from "../src/lib/ledger.js";
+import { todayTotals, daysOwed, owingCustomers, payPageLink, upiLink, reminderMessage, dailySummary } from "../src/lib/ledger.js";
 import { keywordParse } from "../src/lib/parser.js";
 import { parseNumberAt } from "../src/lib/numbers.js";
 import { tokenize } from "../src/lib/match.js";
@@ -75,7 +75,8 @@ test("voice flow: the 7 acceptance steps, in order", async () => {
   s = o.session;
   assert.equal(s.reminders.length, 2);
   assert.deepEqual(s.reminders.map((r) => [r.name, r.balance]), [["Sharma ji", 660], ["Ravi doodhwala", 150]]);
-  assert.equal(s.reminders[0].message, "Namaste Sharma ji, Laxmi Kirana mein aapka ₹660 baaki hai. Suvidha anusar chuka dein.");
+  // Sharma ji's udhaar is 12 days old in the seed data, Ravi's 5: longest-owed goes first.
+  assert.equal(s.reminders[0].message, "Namaste Sharma ji, Laxmi Kirana mein aapka ₹660 baaki hai (12 din se). Suvidha anusar chuka dein.");
   assert.match(s.reminders[0].link, /^https:\/\/wa\.me\/919800000001\?text=Namaste%20Sharma%20ji/);
 
   // 7. Stock in
@@ -229,4 +230,120 @@ test("'ji' is not a yes: a new sentence with a name does not save the open card"
   o = await talk(o.session, "350 रुपये उधार शर्मा जी");
   assert.equal(o.reply, "Price list se ₹160 banta hai. ₹160 likhun ya ₹350?");
   assert.equal(o.session.state.entries.length, 0);
+});
+
+test("hands-free: chatter gets no reply and no miss, but an open question still gets one", async () => {
+  const s0 = newSession(seedState());
+  let o = await handleUtterance(s0, "arre bhai kal match dekha kya", { ignoreNoise: true });
+  assert.equal(o.ignored, true);
+  assert.equal(o.reply, "");
+  assert.equal(o.session, s0);
+  for (const chatter of ["kitna garam hai aaj bhi", "haan bhai sab theek", "tv band karo"]) {
+    assert.equal((await handleUtterance(s0, chatter, { ignoreNoise: true })).ignored, true, chatter);
+  }
+
+  o = await handleUtterance(s0, "Paanch Maggi aur do Parle-G, cash.", { ignoreNoise: true });
+  assert.equal(o.reply, "₹90 cash, likh diya. Parle-G sirf 4 bache.");
+
+  o = await handleUtterance(s0, "Sharma ji do Maggi", { ignoreNoise: true }); // no mode: the app asks
+  assert.equal(o.reply, "Cash ya udhaar?");
+  assert.equal(o.expectReply, true);
+  const asked = o.session;
+  o = await handleUtterance(asked, "hmm", { ignoreNoise: true });
+  assert.notEqual(o.ignored, true); // a question is open, so a non-answer is still handled
+});
+
+test("Claude is asked only when the keyword parser is unsure", async () => {
+  const { parseTranscript } = await import("../src/lib/llm.js");
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push(JSON.parse(opts.body).transcript);
+    return { ok: true, json: async () => ({ parsed: { intent: "sale", customer: null, items: [{ product: "Maggi", qty: 3 }], mode: "cash", spoken_amount: null, confidence: 0.9 }, ms: 800 }) };
+  };
+  try {
+    const shop = seedState();
+    let r = await parseTranscript("Paanch Maggi aur do Parle-G, cash.", shop, true);
+    assert.equal(r.source, "keywords");
+    assert.equal(calls.length, 0);
+
+    r = await parseTranscript("teen woh peele wale noodles de do cash mein", shop, true);
+    assert.equal(r.source, "claude");
+    assert.equal(calls.length, 1);
+
+    r = await parseTranscript("Paanch Maggi cash", shop, false);
+    assert.equal(r.source, "keywords");
+    assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("udhaar age: starts when a customer begins to owe, clears when paid, undo restores it", async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  let s = newSession(seedState());
+  const cust = (name) => s.state.customers.find((c) => c.name === name);
+  assert.equal(daysOwed(cust("Sharma ji")), 12);
+  assert.equal(daysOwed(cust("Gupta aunty")), 35);
+  assert.deepEqual(owingCustomers(s.state).map((c) => c.name), ["Gupta aunty", "Sharma ji", "Ravi doodhwala"]);
+
+  // More udhaar does not reset the age; paying everything clears it.
+  s = (await handleUtterance(s, "Sharma ji do Maggi udhaar")).session;
+  s = (await handleUtterance(s, "haan")).session;
+  assert.equal(daysOwed(cust("Sharma ji")), 12);
+  s = (await handleUtterance(s, "Gupta aunty ne do sau diye")).session;
+  assert.equal(daysOwed(cust("Gupta aunty")), null);
+  // Undo brings the old date back.
+  s = (await handleUtterance(s, "pichhli entry hatao")).session;
+  assert.equal(daysOwed(cust("Gupta aunty")), 35);
+
+  // A customer who starts owing today is "0 days".
+  s = (await handleUtterance(s, "Ravi school wale ko do Maggi udhaar")).session;
+  s = (await handleUtterance(s, "haan")).session;
+  assert.equal(daysOwed(cust("Ravi school wale")), 0);
+  assert.equal(daysOwed(cust("Ravi school wale"), Date.now() + 3 * DAY), 3);
+});
+
+test("reminders: to one named customer, with a UPI pay link", async () => {
+  let s = newSession(seedState());
+  let o = await handleUtterance(s, "Sharma ji ko reminder bhejo");
+  assert.equal(o.reply, "Sharma ji ko ₹500 ka reminder bhejun?");
+  o = await handleUtterance(o.session, "haan");
+  assert.deepEqual(o.session.reminders.map((r) => r.name), ["Sharma ji"]);
+
+  o = await handleUtterance(s, "Ravi ko hisaab bhejo");
+  assert.equal(o.reply, "Doodhwale Ravi ya school wale Ravi?");
+  o = await handleUtterance(o.session, "doodhwale");
+  assert.equal(o.reply, "Ravi doodhwala ko ₹150 ka reminder bhejun?");
+  assert.equal((await handleUtterance(s, "Ravi school wale ko reminder bhejo")).reply, "Ravi school wale ka kuch baaki nahi.");
+
+  const sharma = s.state.customers[0];
+  const page = payPageLink("https://khata.example", s.state, sharma);
+  assert.equal(page, "https://khata.example/pay?to=laxmikirana.demo%40upi&shop=Laxmi+Kirana&am=500&name=Sharma+ji");
+  assert.match(reminderMessage(s.state.shop, sharma, { payLink: page }), /\(12 din se\)\. Suvidha anusar chuka dein\. UPI se yahan chukayein: https:\/\/khata\.example\/pay\?/);
+  assert.equal(upiLink("shop@okaxis", "Laxmi Kirana", 500, "udhaar"), "upi://pay?pa=shop%40okaxis&pn=Laxmi+Kirana&am=500&cu=INR&tn=udhaar");
+  assert.equal(payPageLink(null, s.state, sharma), null); // no origin (tests, server): no link
+});
+
+test("aaj ka hisaab bhejo: spoken totals and a WhatsApp summary", async () => {
+  let s = newSession(seedState());
+  for (const t of ["Sharma ji, do kilo atta, ek Surf, udhaar mein likh do.", "Haan", "Paanch Maggi aur do Parle-G, cash.", "Gupta aunty ne do sau diye."]) {
+    s = (await handleUtterance(s, t)).session;
+  }
+  for (const say of ["Aaj ka hisaab bhejo.", "आज का हिसाब भेजो"]) {
+    const o = await handleUtterance(s, say);
+    assert.equal(o.reply, "Aaj ₹250 ki bikri, ₹160 udhaar, ₹200 mile. Hisaab WhatsApp ke liye taiyaar.");
+    const lines = o.session.share.text.split("\n");
+    assert.match(lines[0], /^Laxmi Kirana · aaj ka hisaab \(/);
+    assert.deepEqual(lines.slice(1), [
+      "Bikri: ₹250 (cash ₹90, udhaar ₹160)",
+      "Mile (udhaar wapas): ₹200",
+      "Kul udhaar baaki: ₹810 · 2 log",
+      "Kam stock: Parle-G 4",
+      "Entries: 3",
+    ]);
+    assert.match(o.session.share.link, /^https:\/\/wa\.me\/\?text=Laxmi%20Kirana/);
+  }
+  assert.equal(keywordParse("aaj ka hisaab batao", seedState()).intent, "query"); // asking, not sending
+  assert.match(dailySummary(seedState()), /30\+ din purana: Gupta aunty ₹200/);
 });

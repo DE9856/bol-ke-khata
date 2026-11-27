@@ -19,6 +19,14 @@ const UDHAAR_WORDS = ["udhaar", "udhar", "udhaari", "udhari", "udaar", "udhaar",
 const CASH_WORDS = ["cash", "nakad", "nagad", "naqad", "upi", "paytm", "gpay", "phonepe", "online", "qr", "kash"];
 const PAYMENT_WORDS = ["diye", "diya", "die", "jama", "mile", "mila", "paid", "chukaye", "chukaya", "chuka", "lautaye", "lautaya", "bhare", "bhara", "payment"];
 const QUERY_WORDS = ["kitna", "kitni", "kitne", "kya", "batao", "bata", "hisaab", "hisab", "total", "bika", "biki", "bikri", "kamai", "kamaya", "bacha", "bachi", "bache", "stock", "daam", "rate", "price"];
+// A question about the day's totals needs one of these; "kya" alone is everyday chatter.
+const TOTALS_WORDS = ["bika", "biki", "bikri", "hisaab", "hisab", "total", "kamai", "kamaya", "galla", "sale", "sales"];
+const HOW_MUCH = ["kitna", "kitni", "kitne"];
+// "aaj kitna hua" / "aaj ka kitna" asks for totals; "kitna garam hai aaj" does not.
+const aajKitna = (tokens) => tokens.some((t, i) => t === "aaj" && tokens.slice(i + 1, i + 3).some((n) => HOW_MUCH.some((w) => isWord(n, [w]))));
+// "Aaj ka hisaab bhejo": a summary word plus a send word.
+const SUMMARY_WORDS = ["hisaab", "hisab", "summary", "report"];
+const SEND_WORDS = ["bhejo", "bhej", "bhejna", "bhejiye", "send", "share", "whatsapp"];
 const REMINDER_WORDS = ["reminder", "remind", "yaad", "tagada", "takaza", "tagaada"];
 const STOCK_IN_WORDS = ["aaya", "aaye", "aayi", "aai", "aya", "aye", "aagaya", "mangaya", "mangaye", "maal", "stockin", "aa"];
 const UNDO_WORDS = ["pichhli", "pichli", "pichhla", "pichla", "last", "aakhri", "akhri"];
@@ -150,7 +158,16 @@ export function keywordParse(text, shop) {
 
   if (includesWord(tokens, UNDO_WORDS) && includesWord(tokens, [...REMOVE_WORDS, "entry"])) return { ...empty, intent: "undo", confidence: 0.95 };
   if (tokens.includes("undo")) return { ...empty, intent: "undo", confidence: 0.95 };
-  if (includesWord(tokens, REMINDER_WORDS)) return { ...empty, intent: "reminder", confidence: 0.95 };
+  // Reminders: to one named customer ("Sharma ji ko reminder bhejo", "Sharma ji ko hisaab bhejo") or to all.
+  // "Aaj ka hisaab bhejo" with no name is the day's summary.
+  const wantsReminder = includesWord(tokens, REMINDER_WORDS);
+  const wantsSend = includesWord(tokens, SUMMARY_WORDS) && includesWord(tokens, SEND_WORDS);
+  if (wantsReminder || wantsSend) {
+    const who = findCustomer(tokens, shop.customers);
+    const name = who ? (who.candidates.length === 1 ? who.candidates[0].name : tokens.slice(who.start, who.start + who.len).join(" ")) : null;
+    if (name) return { ...empty, intent: "reminder", customer: name, confidence: who.score < 1 ? 0.8 : 0.95 };
+    return { ...empty, intent: wantsReminder ? "reminder" : "summary", confidence: 0.95 };
+  }
 
   let confidence = 0.95;
   const cust = findCustomer(tokens, shop.customers);
@@ -190,7 +207,8 @@ export function keywordParse(text, shop) {
 
   let intent = null;
   if (has(STOCK_IN_WORDS) && items.length && !mode) intent = "stock_in";
-  else if (has(QUERY_WORDS) && !mode && !(has(PAYMENT_WORDS) && spoken_amount != null)) intent = "query";
+  else if (has(QUERY_WORDS) && !mode && !(has(PAYMENT_WORDS) && spoken_amount != null)
+    && (customer || items.length || has(TOTALS_WORDS) || aajKitna(tokens))) intent = "query";
   else if (has(PAYMENT_WORDS) && customer && !items.length && spoken_amount != null) intent = "payment";
   else if (items.length || (mode && spoken_amount != null)) intent = "sale";
   else if (customer && spoken_amount != null && has(PAYMENT_WORDS)) intent = "payment";

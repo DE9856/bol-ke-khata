@@ -21,7 +21,7 @@ const client = KEY_SET ? new Anthropic({ apiKey: API_KEY, timeout: 3500, maxRetr
 const SCHEMA = {
   type: "object",
   properties: {
-    intent: { anyOf: [{ type: "string", enum: ["sale", "payment", "query", "reminder", "stock_in", "undo"] }, { type: "null" }] },
+    intent: { anyOf: [{ type: "string", enum: ["sale", "payment", "query", "reminder", "summary", "stock_in", "undo"] }, { type: "null" }] },
     customer: { anyOf: [{ type: "string" }, { type: "null" }] },
     items: {
       type: "array",
@@ -48,7 +48,7 @@ const SYSTEM = `You turn one spoken sentence from an Indian kirana shopkeeper in
 The sentence comes from speech recognition: Hindi, Hinglish or English, in Devanagari or Roman script or both, with any regional accent and recognition mistakes.
 
 Fields:
-- intent: "sale" (goods sold), "payment" (a customer paid money towards their udhaar, e.g. "Gupta aunty ne do sau diye"), "query" (a question: today's sales, a customer's balance, a product's stock or price), "reminder" (send payment reminders), "stock_in" (goods arrived, e.g. "bees packet Maggi aaya"), "undo" (remove the last entry, e.g. "pichhli entry hatao"), or null when the sentence is noise, chatter, TV or has nothing to record.
+- intent: "sale" (goods sold), "payment" (a customer paid money towards their udhaar, e.g. "Gupta aunty ne do sau diye"), "query" (a question: today's sales, a customer's balance, a product's stock or price), "reminder" (send payment reminders), "summary" (send today's summary on WhatsApp, e.g. "aaj ka hisaab bhejo"), "stock_in" (goods arrived, e.g. "bees packet Maggi aaya"), "undo" (remove the last entry, e.g. "pichhli entry hatao"), or null when the sentence is noise, chatter, TV or has nothing to record.
 - customer: the customer's name as spoken, or the closest name from the customer list when it clearly sounds like one ("Sarma ji" -> "Sharma ji"). Include words that tell two customers apart ("Ravi doodhwala"). null if no customer is named.
 - items: each product with its quantity as a number. Use the closest product from the product list when it sounds like one ("megi" -> "Maggi", "sarf" -> "Surf"); otherwise the product word as spoken (a new product). qty is null if no quantity was said. Number words: ek 1, do 2, teen 3, char 4, paanch 5, chhe 6, saat 7, aath 8, nau 9, das 10, bees 20, sau 100; dedh 1.5, dhai 2.5, sava = +0.25 ("sava do" 2.25), saade = +0.5 ("saade teen" 3.5), paune = -0.25; "three fifty" = 350. "do" after a verb ("likh do", "de do") means "do it", not 2.
 - mode: "udhaar" for udhaar, udhar, khate mein, khata, baad mein dega, credit; "cash" for cash, nakad, UPI, Paytm, GPay, PhonePe, online. null if neither was said.
@@ -56,7 +56,31 @@ Fields:
 - confidence: 0 to 1, how sure you are that you understood every field correctly. Lower it for garbled or partial sentences.`;
 
 const app = express();
+app.set("trust proxy", 1); // behind Render/Railway/Fly proxies: req.ip is the visitor, not the proxy
+app.disable("x-powered-by");
 app.use(express.json({ limit: "20kb" }));
+app.use((_req, res, next) => {
+  res.set({ "X-Content-Type-Options": "nosniff", "Referrer-Policy": "strict-origin-when-cross-origin", "Permissions-Policy": "microphone=(self), camera=()" });
+  next();
+});
+
+// On a public link anyone can call /api/parse, which spends the Claude key. Limit it per visitor and
+// overall; over the limit the browser simply uses its keyword parser (it treats 429 like any error).
+const PER_IP_PER_MIN = Number(process.env.PARSE_PER_IP_PER_MIN) || 20;
+const ALL_PER_MIN = Number(process.env.PARSE_ALL_PER_MIN) || 120;
+const hits = new Map();
+let windowStart = Date.now();
+let allHits = 0;
+function rateLimited(ip) {
+  const now = Date.now();
+  if (now - windowStart > 60_000) { hits.clear(); allHits = 0; windowStart = now; }
+  const n = (hits.get(ip) || 0) + 1;
+  hits.set(ip, n);
+  allHits += 1;
+  return n > PER_IP_PER_MIN || allHits > ALL_PER_MIN;
+}
+
+app.get("/healthz", (_req, res) => res.type("text").send("ok"));
 
 app.get("/api/status", (_req, res) => {
   res.json({ llm: KEY_SET, model: KEY_SET ? MODEL : null, message: KEY_SET ? "Claude parsing on" : "AI key not set: using the built-in keyword parser" });
@@ -64,6 +88,7 @@ app.get("/api/status", (_req, res) => {
 
 app.post("/api/parse", async (req, res) => {
   if (!client) return res.status(503).json({ error: "key not set" });
+  if (rateLimited(req.ip)) return res.status(429).json({ error: "too many requests: using keyword parser" });
   const transcript = String(req.body?.transcript || "").slice(0, 500);
   const customers = (req.body?.customers || []).map(String).slice(0, 200);
   const products = (req.body?.products || []).map(String).slice(0, 500);
@@ -103,8 +128,17 @@ app.post("/api/parse", async (req, res) => {
 });
 
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
-  app.get("*", (_req, res) => res.sendFile(path.join(distDir, "index.html")));
+  // Hashed build files never change, so cache them for a year; the page, manifest and service worker
+  // must always be fresh so an installed app picks up new versions.
+  app.use("/assets", express.static(path.join(distDir, "assets"), { immutable: true, maxAge: "1y" }));
+  app.use(express.static(distDir, {
+    setHeaders(res, file) {
+      const name = path.basename(file);
+      if (name === "sw.js" || name === "index.html" || name.endsWith(".webmanifest")) res.setHeader("Cache-Control", "no-cache");
+      if (name.endsWith(".webmanifest")) res.setHeader("Content-Type", "application/manifest+json");
+    },
+  }));
+  app.get("*", (_req, res) => { res.setHeader("Cache-Control", "no-cache"); res.sendFile(path.join(distDir, "index.html")); });
 } else {
   app.get("/", (_req, res) => res.type("text").send("Front end not built yet. Run `npm run build`, or use `npm run dev` and open http://localhost:5173"));
 }

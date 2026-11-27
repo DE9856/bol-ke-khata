@@ -1,0 +1,27 @@
+{
+  "name": "bol-ke-khata",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice-first ledger for kirana shops: speak sales, udhaar, payments and stock in Hindi/Hinglish.",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"node --watch server/index.js\"",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test test/acceptance.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.8.0",
+    "express": "4.21.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "autoprefixer": "10.4.20",
+    "concurrently": "9.1.0",
+    "postcss": "8.4.49",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwindcss": "3.4.17",
+    "vite": "5.4.11"
+  }
+}

@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Empty by default: the app starts and works without any key.
+      # To enable Claude parsing, put ANTHROPIC_API_KEY=... in a .env file next to this one.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=3000
+    restart: unless-stopped
